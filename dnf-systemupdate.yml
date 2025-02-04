@@ -1,0 +1,37 @@
+---
+- name: Update Packages and Reboot if Required
+  hosts: all
+  become: yes
+  tasks:
+
+    - name: Ensure log directory exists
+      file:
+        path: /var/log/ansible
+        state: directory
+        mode: '0755'
+
+    - name: Update all packages using DNF
+      command: "dnf update -y"
+      register: dnf_output
+      changed_when: "'Nothing to do' not in dnf_output.get('stdout', '')"
+      failed_when: dnf_output.rc != 0
+
+    - name: Log update output
+      copy:
+        content: |
+          --- Update Run at {{ ansible_date_time.date }} {{ ansible_date_time.time }} ---
+          {{ dnf_output.stdout | default('') }}
+          {{ dnf_output.stderr | default('') }}
+        dest: "/var/log/ansible/dnf-update-{{ ansible_date_time.date }}.log"
+        mode: '0644'
+
+    - name: Check if a reboot is required
+      command: "needs-restarting -r"
+      register: reboot_required
+      failed_when: reboot_required.rc > 1
+      changed_when: reboot_required.rc == 1
+      ignore_errors: true
+
+    - name: Reboot system if required
+      reboot:
+      when: reboot_required.rc == 1
