@@ -1,0 +1,35 @@
+---
+- name: Update Ubuntu and Reboot if Required
+  hosts: all
+  become: yes
+  tasks:
+
+    - name: Update package list and upgrade packages
+      apt:
+        update_cache: yes
+        upgrade: dist
+      register: update_result
+      notify: Log update activity
+
+    - name: Check if a reboot is required
+      stat:
+        path: /var/run/reboot-required
+      register: reboot_check
+
+    - name: Log if a reboot is required
+      lineinfile:
+        path: /var/log/ansible_software_update.log
+        line: "Reboot required: {{ reboot_check.stat.exists }}"
+        create: yes
+      when: reboot_check.stat.exists
+
+    - name: Reboot the server if required
+      reboot:
+      when: reboot_check.stat.exists
+
+  handlers:
+    - name: Log update activity
+      lineinfile:
+        path: /var/log/ansible_software_update.log
+        line: "System updated successfully at {{ ansible_date_time.iso8601 }}"
+        create: yes
