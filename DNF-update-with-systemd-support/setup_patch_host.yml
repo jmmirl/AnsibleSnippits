@@ -1,0 +1,38 @@
+---
+- name: Setup remote host for patch updates
+  hosts: all
+  become: yes
+  vars:
+    patch_script_path: /usr/local/sbin/patchupdate.sh
+    log_file: /var/log/patchupdate.log
+
+  tasks:
+    - name: Ensure log file exists
+      file:
+        path: "{{ log_file }}"
+        state: touch
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Copy patch update script to remote host
+      copy:
+        dest: "{{ patch_script_path }}"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          LOG="{{ log_file }}"
+          echo "==== $(date) ====" >> "$LOG"
+          if dnf -y update >> "$LOG" 2>&1; then
+              echo "Update successful" >> "$LOG"
+          else
+              echo "Update failed" >> "$LOG"
+          fi
+
+          if [ -f /run/reboot-required ]; then
+              echo "Reboot required. Rebooting..." >> "$LOG"
+              /usr/sbin/shutdown -r now
+          else
+              echo "No reboot needed." >> "$LOG"
+          fi
+
