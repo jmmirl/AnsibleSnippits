@@ -1,0 +1,61 @@
+---
+- name: Configure logging and patch update scheduling
+  hosts: all
+  become: yes
+  vars:
+    patch_script_path: /usr/local/sbin/patchupdate.sh
+    log_file: /var/log/patchupdate.log
+    logrotate_config_path: /etc/logrotate.d/patchupdate
+    patch_time: "03:00"
+
+  tasks:
+    - name: Install logrotate config for patch update logs
+      copy:
+        dest: "{{ logrotate_config_path }}"
+        content: |
+          {{ log_file }} {
+              weekly
+              rotate 4
+              compress
+              missingok
+              notifempty
+              create 0644 root root
+          }
+        mode: '0644'
+
+    - name: Install systemd service
+      copy:
+        dest: /etc/systemd/system/patchupdate.service
+        content: |
+          [Unit]
+          Description=Run local patch update script
+
+          [Service]
+          Type=oneshot
+          ExecStart={{ patch_script_path }}
+        mode: '0644'
+
+    - name: Install systemd timer
+      copy:
+        dest: /etc/systemd/system/patchupdate.timer
+        content: |
+          [Unit]
+          Description=Run patch update daily at {{ patch_time }}
+
+          [Timer]
+          OnCalendar=*-*-* {{ patch_time }}
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+        mode: '0644'
+
+    - name: Reload systemd
+      command: systemctl daemon-reexec
+
+    - name: Enable and start patchupdate.timer
+      systemd:
+        name: patchupdate.timer
+        enabled: yes
+        state: started
+
