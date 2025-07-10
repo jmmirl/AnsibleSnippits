@@ -1,0 +1,151 @@
+---
+- name: Format and mount GlusterFS brick
+  hosts: gluster
+  become: true
+  vars:
+    brick_device: /dev/nvme1n1
+    brick_mount_point: /data/brick1
+  tasks:
+    - name: Ensure ext4 filesystem on {{ brick_device }}
+      filesystem:
+        fstype: ext4
+        dev: "{{ brick_device }}"
+      ignore_errors: true
+
+    - name: Create brick mount directory
+      file:
+        path: "{{ brick_mount_point }}"
+        state: directory
+        mode: '0755'
+
+    - name: Mount brick and ensure persistence
+      mount:
+        path: "{{ brick_mount_point }}"
+        src: "{{ brick_device }}"
+        fstype: ext4
+        opts: defaults
+        state: mounted
+
+- name: Set up mutual SSH key authentication
+  hosts: gluster
+  become: true
+  vars:
+    ssh_user: ubuntu
+  tasks:
+    - name: Ensure .ssh directory exists
+      file:
+        path: "/home/{{ ssh_user }}/.ssh"
+        state: directory
+        owner: "{{ ssh_user }}"
+        mode: '0700'
+
+    - name: Generate SSH key if not present
+      become_user: "{{ ssh_user }}"
+      openssh_keypair:
+        path: "/home/{{ ssh_user }}/.ssh/id_rsa"
+        type: rsa
+        size: 2048
+      register: keygen
+      ignore_errors: true
+
+    - name: Fetch public key
+      slurp:
+        src: "/home/{{ ssh_user }}/.ssh/id_rsa.pub"
+      register: slurped_key
+
+    - name: Set fact for pubkey
+      set_fact:
+        pubkey: "{{ slurped_key.content | b64decode }}"
+
+    - name: Collect pubkeys
+      add_host:
+        name: "{{ inventory_hostname }}"
+        pubkey: "{{ pubkey }}"
+
+- name: Exchange SSH keys across hosts
+  hosts: gluster
+  become: true
+  vars:
+    ssh_user: ubuntu
+  tasks:
+    - name: Gather all pubkeys
+      set_fact:
+        all_gluster_pubkeys: "{{ groups['gluster'] | map('extract', hostvars, 'pubkey') | list }}"
+
+    - name: Append pubkeys to authorized_keys
+      lineinfile:
+        path: "/home/{{ ssh_user }}/.ssh/authorized_keys"
+        line: "{{ item }}"
+        create: yes
+        state: present
+        owner: "{{ ssh_user }}"
+        mode: '0600'
+      loop: "{{ all_gluster_pubkeys }}"
+
+- name: Populate /etc/hosts with Gluster nodes
+  hosts: gluster
+  become: true
+  tasks:
+    - name: Ensure host entries exist
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ hostvars[item].ansible_host }} {{ item }}"
+        state: present
+      loop: "{{ groups['gluster'] }}"
+      when: hostvars[item].ansible_host is defined
+
+- name: Probe peer and create GlusterFS volume
+  hosts: gluster[0]
+  become: true
+  vars:
+    gluster_volume_name: gv0
+    brick_mount_point: /data/brick1
+  tasks:
+    - name: Probe peer using IP address
+      shell: >
+        gluster peer probe {{ hostvars[groups['gluster'][1]].ansible_host | default(groups['gluster'][1]) }}
+      register: probe_result
+      failed_when: probe_result.rc != 0 and 'already in peer list' not in probe_result.stderr
+      changed_when: "'success' in probe_result.stderr or 'already in peer list' in probe_result.stderr"
+
+    - name: Wait for peer to connect
+      shell: |
+        until gluster peer status | grep -q 'Peer in Cluster'; do
+          sleep 2
+        done
+
+    - name: Create replicated GlusterFS volume
+      shell: >
+        gluster volume create {{ gluster_volume_name }}
+        replica 2
+        {{ groups['gluster'][0] }}:{{ brick_mount_point }}
+        {{ groups['gluster'][1] }}:{{ brick_mount_point }}
+        force
+      args:
+        creates: "/var/lib/glusterd/vols/{{ gluster_volume_name }}"
+
+    - name: Start GlusterFS volume
+      shell: gluster volume start {{ gluster_volume_name }}
+      register: volume_start
+      failed_when: volume_start.rc != 0 and 'already started' not in volume_start.stderr
+      changed_when: "'volume start: ' in volume_start.stderr and 'already started' not in volume_start.stderr"
+
+- name: Mount GlusterFS volume and persist
+  hosts: gluster
+  become: true
+  vars:
+    gluster_volume_name: gv0
+    gluster_mount_point: /mnt/glusterfs
+  tasks:
+    - name: Create mount point
+      file:
+        path: "{{ gluster_mount_point }}"
+        state: directory
+
+    - name: Mount GlusterFS volume
+      mount:
+        path: "{{ gluster_mount_point }}"
+        src: "{{ groups['gluster'][0] }}:/{{ gluster_volume_name }}"
+        fstype: glusterfs
+        opts: defaults,_netdev
+        state: mounted
